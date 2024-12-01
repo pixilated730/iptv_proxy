@@ -22,7 +22,7 @@ https://github.com/user-attachments/assets/4fd3c242-b1d0-4f2b-bccb-d0b98b8ba94e
 
 Click the button below to deploy this project to Vercel.
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/import/project?template=https://github.com/dtankdempse/m3u-playlist-proxy)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/import/project?template=https://github.com/pixilated730/iptv_proxy)
 
 ### Steps to Deploy:
 
