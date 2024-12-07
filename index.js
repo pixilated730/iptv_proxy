@@ -1,5 +1,5 @@
-const http = require('http');
 const https = require('https');
+const http = require('http');
 const url = require('url');
 const zlib = require('zlib');
 let Redis;
@@ -11,6 +11,52 @@ if (process.env.REDIS_URL) {
 let sessionTokens = {};
 let lastCheckedTimestamps = {};
 const storage = initializeStorage();
+
+// Initialize storage based on environment
+function initializeStorage() {
+  if (process.env.VERCEL) return require('@vercel/kv');
+  if (process.env.REDIS_URL) return new Redis(process.env.REDIS_URL);
+  return null;
+}
+
+// Get session key from path
+function getSessionKey(path) {
+  const parts = path.split('/');
+  return parts.slice(0, 5).join('/');
+}
+
+// Get session token from storage
+async function getSessionToken(path) {
+  const key = `sessionToken:${path}`;
+  if (storage && storage.get) {
+    const tokenData = await storage.get(key);
+    return tokenData ? JSON.parse(tokenData) : null;
+  }
+  return sessionTokens[key];
+}
+
+// Set session token in storage
+async function setSessionToken(path, token, timestamp) {
+  const key = `sessionToken:${path}`;
+  const tokenData = JSON.stringify({ token, timestamp });
+  if (storage && storage.set) {
+    await storage.set(key, tokenData);
+  } else {
+    sessionTokens[key] = { token, timestamp };
+  }
+}
+
+// Get last checked timestamp
+async function getLastCheckedTimestamp(token) {
+  if (storage && storage.get) return await storage.get(`lastCheckedTimestamp:${token}`);
+  return lastCheckedTimestamps[token];
+}
+
+// Set last checked timestamp
+async function setLastCheckedTimestamp(token, timestamp) {
+  if (storage && storage.set) await storage.set(`lastCheckedTimestamp:${token}`, timestamp);
+  else lastCheckedTimestamps[token] = timestamp;
+}
 
 // Fetch URL and handle redirects
 function fetchUrl(requestUrl, headers = {}, redirectCount = 0) {
@@ -312,31 +358,40 @@ ${combinedContent.trim()}`;
 ${combinedContent.trim()}`;
     }
 
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    return res.end(combinedContent.trim());
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/plain');
+    res.end(combinedContent.trim());
   } catch (err) {
     console.error('Error in handlePlaylistRequest:', err);
-    res.writeHead(500, { 'Content-Type': 'text/plain' });
-    return res.end('Error processing playlist');
+    res.statusCode = 500;
+    res.setHeader('Content-Type', 'text/plain');
+    res.end('Error processing playlist');
   }
 }
 
-// Handle encryption key requests
-async function fetchEncryptionKey(res, url, data) {
+// Fetch encryption key
+async function fetchEncryptionKey(res, urlToFetch, data) {
   try {
-    const result = await fetchContent(url, data, 'binary');
+    const result = await fetchContent(urlToFetch, data, 'binary');
 
     if (result.status >= 400) {
-      res.writeHead(500, { 'Content-Type': 'text/plain' });
-      return res.end(`Failed to fetch encryption key: ${result.status}`);
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'text/plain');
+      res.end(`Failed to fetch encryption key: ${result.status}`);
+      return;
     }
 
-    res.writeHead(200, result.headers);
-    return res.end(result.content);
+    // Set the headers from the response
+    Object.keys(result.headers).forEach(header => {
+      res.setHeader(header, result.headers[header]);
+    });
+    res.statusCode = 200;
+    res.end(result.content);
   } catch (err) {
     console.error('Error in fetchEncryptionKey:', err);
-    res.writeHead(500, { 'Content-Type': 'text/plain' });
-    return res.end('Error fetching encryption key');
+    res.statusCode = 500;
+    res.setHeader('Content-Type', 'text/plain');
+    res.end('Error fetching encryption key');
   }
 }
 
@@ -390,52 +445,6 @@ async function epgMerger(encodedData) {
   }
 
   return `<?xml version="1.0" encoding="UTF-8"?><tv>${mergedEpg}</tv>`;
-}
-
-// Initialize storage based on environment
-function initializeStorage() {
-  if (process.env.VERCEL) return require('@vercel/kv');
-  if (process.env.REDIS_URL) return new Redis(process.env.REDIS_URL);
-  return null;
-}
-
-// Get session key from path
-function getSessionKey(path) {
-  const parts = path.split('/');
-  return parts.slice(0, 5).join('/');
-}
-
-// Get session token from storage
-async function getSessionToken(path) {
-  const key = `sessionToken:${path}`;
-  if (storage && storage.get) {
-    const tokenData = await storage.get(key);
-    return tokenData ? JSON.parse(tokenData) : null;
-  }
-  return sessionTokens[key];
-}
-
-// Set session token in storage
-async function setSessionToken(path, token, timestamp) {
-  const key = `sessionToken:${path}`;
-  const tokenData = JSON.stringify({ token, timestamp });
-  if (storage && storage.set) {
-    await storage.set(key, tokenData);
-  } else {
-    sessionTokens[key] = { token, timestamp };
-  }
-}
-
-// Get last checked timestamp
-async function getLastCheckedTimestamp(token) {
-  if (storage && storage.get) return await storage.get(`lastCheckedTimestamp:${token}`);
-  return lastCheckedTimestamps[token];
-}
-
-// Set last checked timestamp
-async function setLastCheckedTimestamp(token, timestamp) {
-  if (storage && storage.set) await storage.set(`lastCheckedTimestamp:${token}`, timestamp);
-  else lastCheckedTimestamps[token] = timestamp;
 }
 
 // Streamed.Su Functions
@@ -562,8 +571,7 @@ async function StreamedSUtokenCheck(token) {
   });
 }
 
-// Create HTTP server
-http.createServer(async (req, res) => {
+module.exports = async (req, res) => {
   try {
     const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
     const pathname = parsedUrl.pathname;
@@ -685,6 +693,7 @@ http.createServer(async (req, res) => {
         margin-bottom: 20px;
         color: #626262;
     }
+    
     
     .container {
         max-width: 600px;
@@ -911,6 +920,11 @@ http://example.com/playlist.m3u8
             document.getElementById('headerForm').insertBefore(headerPair, document.getElementById('add-more'));
         });
 
+        document.getElementById('checkUncheckAll')?.addEventListener('change', function () {
+            const isChecked = this.checked;
+            document.querySelectorAll('.group-checkbox').forEach(checkbox => checkbox.checked = isChecked);
+        });
+
         document.getElementById('fetchPlaylistGroups').addEventListener('click', async function (event) {
             event.preventDefault(); // Prevent form submission
 
@@ -968,7 +982,7 @@ http://example.com/playlist.m3u8
             });
         });
 
-        document.getElementById('headerForm').addEventListener('submit', function (event) {
+        document.getElementById('headerForm').addEventListener('submit', async function (event) {
             event.preventDefault();
 
             const playlistUrl = document.getElementById('playlistUrl').value.trim();
@@ -1057,10 +1071,11 @@ http://example.com/playlist.m3u8
             }
         });
     </script>
+
 </body>
-</html>
-`;
-      res.writeHead(200, { 'Content-Type': 'text/html' });
+</html>`;
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'text/html');
       res.end(html);
       return;
     }
@@ -1069,43 +1084,33 @@ http://example.com/playlist.m3u8
       const targetUrl = query.url;
 
       if (!targetUrl) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ error: 'Missing URL parameter' }));
         return;
       }
 
       try {
-        const parsedTargetUrl = new URL(targetUrl);
-        const protocol = parsedTargetUrl.protocol === 'https:' ? https : http;
+        const result = await fetchContent(targetUrl, null, 'text');
 
-        protocol.get(targetUrl, (response) => {
-          let data = '';
-
-          response.on('data', chunk => {
-            data += chunk;
-          });
-
-          response.on('end', () => {
-            if (!res.headersSent) {
-              res.writeHead(200, { 'Content-Type': 'text/plain' });
-              res.end(data);
-            }
-          });
-        }).on('error', (e) => {
-          if (!res.headersSent) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: e.message }));
-          }
-        });
-
-      } catch (error) {
-        if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: error.message }));
+        if (result.status !== 200) {
+          res.statusCode = result.status;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: `Failed to fetch URL, status code: ${result.status}` }));
+          return;
         }
+
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'text/plain');
+        res.end(result.content);
+      } catch (error) {
+        console.error('Error fetching target URL:', error);
+        res.statusCode = 500;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: error.message }));
       }
 
-      return; 
+      return;
     }
 
     if (pathname === '/playlist') {
@@ -1114,7 +1119,8 @@ http://example.com/playlist.m3u8
       const epgMerging = query.epgMerging === 'true';
 
       if (!urlParam) {
-        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'text/plain');
         res.end('URL parameter missing');
         return;
       }
@@ -1122,21 +1128,25 @@ http://example.com/playlist.m3u8
       await handlePlaylistRequest(req, res, urlParam, dataParam, epgMerging);
       return;
     }
-    
+
     if (pathname === '/Epg') {
       const dataParam = query.data;
       if (!dataParam) {
-        res.writeHead(400, { 'Content-Type': 'text/plain' });
-        return res.end('Data parameter missing');
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'text/plain');
+        res.end('Data parameter missing');
+        return;
       }
 
       try {
         const mergedEpg = await epgMerger(dataParam);
-        res.writeHead(200, { 'Content-Type': 'application/xml' });
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/xml');
         res.end(mergedEpg);
       } catch (error) {
         console.error('Error in epgMerger:', error);
-        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.statusCode = 500;
+        res.setHeader('Content-Type', 'text/plain');
         res.end('Failed to merge EPGs');
       }
       return;
@@ -1164,7 +1174,8 @@ http://example.com/playlist.m3u8
           const protocol = req.headers['x-forwarded-proto'] || (req.connection.encrypted ? 'https' : 'http');
           const proxyUrl = `${protocol}://${req.headers.host}`;
           const fullUrl = `${proxyUrl}/playlist?url=${requestUrl}&data=${encodeURIComponent(Buffer.from(data).toString('base64'))}&su=1&suToken=${token}&type=/index.m3u8`;
-          res.writeHead(302, { Location: fullUrl });
+          res.statusCode = 302;
+          res.setHeader('Location', fullUrl);
           res.end();
           return;
         } else if (query.su === '1' && query.suToken) {
@@ -1177,7 +1188,8 @@ http://example.com/playlist.m3u8
       const result = await fetchContent(finalRequestUrl, data, dataType);
 
       if (result.status >= 400) {
-        res.writeHead(result.status, { 'Content-Type': 'text/plain' });
+        res.statusCode = result.status;
+        res.setHeader('Content-Type', 'text/plain');
         res.end(`Error: ${result.status}`);
         return;
       }
@@ -1190,23 +1202,22 @@ http://example.com/playlist.m3u8
         content = rewriteUrls(content, finalRequestUrl, proxyUrl, query.data);
       }
 
-      res.writeHead(result.status, {
-        'Content-Type': 'application/vnd.apple.mpegurl',
-        'Content-Length': Buffer.byteLength(content),
-      });
+      res.statusCode = result.status;
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      res.setHeader('Content-Length', Buffer.byteLength(content));
       res.end(content);
       return;
     }
 
-    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.statusCode = 400;
+    res.setHeader('Content-Type', 'text/plain');
     res.end('Bad Request');
   } catch (err) {
     console.error('Error handling request:', err);
-    if (!res.headersSent) {
-      res.writeHead(500, { 'Content-Type': 'text/plain' });
+    if (!res.writableEnded) {
+      res.statusCode = 500;
+      res.setHeader('Content-Type', 'text/plain');
       res.end('Internal Server Error');
     }
   }
-}).listen(4123, '0.0.0.0', () => {
-  console.log('Server is running on port 4123');
-});
+};
