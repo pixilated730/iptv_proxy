@@ -688,9 +688,20 @@ async function fetchContent(url, data, dataType = 'text') {
       });
     }
 
+    // Add important headers if not present
     headers['User-Agent'] = headers['User-Agent'] || 'Mozilla/5.0 (X11; Linux x86_64)';
-    headers['Accept'] = '*/*';
+    headers['Accept'] = dataType === 'binary' ? '*/*' : 'text/plain;charset=UTF-8';
     headers['Accept-Encoding'] = 'gzip, deflate';
+    
+    // For key requests, ensure we have proper headers
+    if (url.includes('keylocking.ru')) {
+      headers['Accept'] = '*/*';
+      headers['Connection'] = 'keep-alive';
+      if (!headers['Referer']) {
+        // Add default referer if missing
+        headers['Referer'] = new URL(url).origin;
+      }
+    }
 
     logToFile('Request headers: ' + JSON.stringify(headers));
 
@@ -707,6 +718,11 @@ async function fetchContent(url, data, dataType = 'text') {
       content = zlib.inflateSync(response.content);
     } else {
       content = response.content;
+    }
+
+    // For key requests, ensure we got valid data
+    if (url.includes('keylocking.ru') && (!content || content.length < 16)) {
+      throw new Error('Invalid key data received');
     }
 
     if (dataType === 'binary') {
@@ -834,28 +850,69 @@ ${combinedContent.trim()}`;
 
 async function fetchEncryptionKey(res, url, data) {
   try {
-    const result = await fetchContent(url, data, 'binary');
+    // Properly decode the URL and data parameters
+    const decodedUrl = decodeURIComponent(url);
+    
+    // Parse encoded header data
+    const headerData = data ? Buffer.from(data, 'base64').toString() : '';
+    const headers = {
+      'Host': new URL(decodedUrl).host,
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:134.0) Gecko/20100101 Firefox/134.0',
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.5',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Origin': 'https://cookiedwebplay.xyz',
+      'Referer': 'https://cookidwebplay.xyz/',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'cross-site',
+      'Te': 'trailers',
+      'Connection': 'keep-alive'
+    };
 
-    if (result.status >= 400) {
-      setCorsHeaders(res);
-      res.writeHead(500, { 'Content-Type': 'text/plain' });
-      return res.end(`Failed to fetch encryption key: ${result.status}`);
+    // Add any additional headers from the data parameter
+    if (headerData) {
+      headerData.split('|').forEach(header => {
+        const [key, value] = header.split('=').map(x => x.trim());
+        if (key && value) {
+          headers[key] = value.replace(/^["']|["']$/g, '');
+        }
+      });
     }
 
+    logToFile(`Fetching key from ${decodedUrl} with headers: ${JSON.stringify(headers)}`);
+
+    const response = await fetchUrl(decodedUrl, headers);
+    
+    if (response.status >= 400) {
+      logToFile(`Key fetch failed: ${response.status}`);
+      throw new Error(`Failed to fetch key: ${response.status}`);
+    }
+
+    // Return key with correct content type
     setCorsHeaders(res);
     res.writeHead(200, {
-      ...result.headers,
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, HEAD',
-      'Access-Control-Allow-Headers': '*'
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': response.content.length
     });
-    return res.end(result.content);
+    
+    return res.end(response.content);
+
   } catch (err) {
-    logToFile('Error in fetchEncryptionKey:' + err);
+    logToFile(`Key fetch error: ${err.message}`);
     setCorsHeaders(res);
-    res.writeHead(500, { 'Content-Type': 'text/plain' });
-    return res.end('Error fetching encryption key');
+    res.writeHead(500, {
+      'Content-Type': 'text/plain'
+    });
+    return res.end(`Error fetching key: ${err.message}`);
   }
+}
+
+function setCorsHeaders(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Access-Control-Max-Age', '86400');
 }
 
 function rewriteUrls(content, requestUrl, proxyUrl, data) {
